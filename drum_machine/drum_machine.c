@@ -59,10 +59,26 @@ static unsigned short g_phase;
 // envelope
 //
 
-// stage: 0=attack, 1=sustain, 2=release, 3=silence
-static unsigned char g_env_stage;
-static unsigned short g_env_time;
-static unsigned short g_env_lengths[2];
+typedef enum _env_stage {
+  ATTACK = 0,
+  SUSTAIN = 1,
+  RELEASE = 2,
+  SILENCE = 3
+} env_stage;
+
+typedef enum _env_length_index {
+  ATTACK_LEN_IDX,
+  RELEASE_LEN_IDX,
+  ENV_LEN_IDX_MAX
+} env_length_index;
+
+typedef struct _envelope_state {
+  env_stage stage;
+  unsigned short phase;
+  unsigned short lengths[ENV_LEN_IDX_MAX];
+} envelope_state;
+
+static envelope_state g_env_state;
 
 // low-pass filter
 static unsigned char g_lpf_resonance;
@@ -155,8 +171,8 @@ void setup()
   
   // set up the initial values for all the controls
 
-  g_env_lengths[0] = 0;
-  g_env_lengths[1] = 0;
+  g_env_state.lengths[ATTACK_LEN_IDX] = 0;
+  g_env_state.lengths[RELEASE_LEN_IDX] = 0;
 
   g_base_freq = 440;
 
@@ -224,9 +240,9 @@ void loop()
   //
 
   // envelopes are updated only on silence and sustain
-  if ((g_env_stage != 0) && (g_env_stage != 2)) {
-    g_env_lengths[0] = 0; /* analogRead(ATTACK_CTRL) * 4; */
-    g_env_lengths[1] = 1000; /* 1000 + analogRead(RELEASE_CTRL) * 8; */
+  if ((g_env_state.stage != ATTACK) && (g_env_state.stage != RELEASE)) {
+    g_env_state.lengths[ATTACK_LEN_IDX] = 0; /* analogRead(ATTACK_CTRL) * 4; */
+    g_env_state.lengths[RELEASE_LEN_IDX] = 1000; /* 1000 + analogRead(RELEASE_CTRL) * 8; */
   }
 
   // LPF and resonance are always welcome
@@ -246,8 +262,8 @@ void loop()
   new_status = get_button_status();
 
   // is the current pitch released?
-  if ((g_env_stage < 2) && ((g_current_pitch_bit & new_status) == 0)) {
-    g_env_stage = 2;
+  if ((g_env_state.stage < RELEASE) && ((g_current_pitch_bit & new_status) == 0)) {
+    g_env_state.stage = RELEASE;
   }
 
   // are all buttons released?
@@ -278,7 +294,7 @@ void loop()
       cli();
       g_base_freq = get_base_freq(g_current_pitch_bit);
       reset_sample();
-      g_env_stage = 0;
+      g_env_state.stage = ATTACK;
       sei();
     }
   }
@@ -298,8 +314,8 @@ static void reset_sample()
   g_interrupt_cnt = 0;
   
   // reset envelope
-  g_env_stage=3;
-  g_env_time=0;
+  g_env_state.stage=SILENCE;
+  g_env_state.phase=0;
 }
 
 /* interrupt handler - that's where the synthesis happens */
@@ -316,33 +332,33 @@ SIGNAL(PWM_INTERRUPT)
   //
 
   // compute by stage, keeping env_vol between zero and 0xff
-  switch (g_env_stage) {
-  case 0:
-    g_env_time++;
-    if (g_env_time >= g_env_lengths[0]) {
-      g_env_time = 0;
-      g_env_stage = 2; /* no sustain in drums */
+  switch (g_env_state.stage) {
+  case ATTACK:
+    g_env_state.phase++;
+    if (g_env_state.phase >= g_env_state.lengths[ATTACK_LEN_IDX]) {
+      g_env_state.phase = 0;
+      g_env_state.stage = 2; /* no sustain in drums */
     }
-    env_vol = (unsigned char)(g_env_time / (g_env_lengths[0]/0x100 + 1));
+    env_vol = (unsigned char)(g_env_state.phase / (g_env_state.lengths[ATTACK_LEN_IDX]/0x100 + 1));
     break;
 /* No sustain in drums
-  case 1:
+  case SUSTAIN:
     env_vol = 255;
     break;
 */
-  case 2:
-    g_env_time++;
-    if (g_env_time >= g_env_lengths[1]) {
-      g_env_time = 0;
-      g_env_stage = 3;
+  case RELEASE:
+    g_env_state.phase++;
+    if (g_env_state.phase >= g_env_state.lengths[RELEASE_LEN_IDX]) {
+      g_env_state.phase = 0;
+      g_env_state.stage = 3;
     }
     // env_vol can only decrease on stage 2
-    tmp = 255-(unsigned char)(g_env_time/ (g_env_lengths[1]/0x100 + 1));
+    tmp = 255-(unsigned char)(g_env_state.phase / (g_env_state.lengths[RELEASE_LEN_IDX]/0x100 + 1));
     if (tmp < env_vol) {
       env_vol = tmp;
     }
     break;
-  default: /* case 3 */
+  default: /* case SILENCE */
     // at stage three there's nothing to play
     env_vol = 0;
     break;
