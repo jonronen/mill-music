@@ -46,8 +46,17 @@ void setup();
 void loop();
 static void reset_sample();
 
-// 0 for rough sawtooth, 1 for sawtooth, 2 for sine, 3 for square
-static const unsigned char g_wave_type = 1;
+//
+// Wave type and state
+//
+
+typedef enum _wave_type {
+  WAVE_SAWTOOTH,
+  WAVE_TRIANGLE,
+  WAVE_NOISE,
+  WAVE_SQUARE
+};
+static const unsigned char g_wave_type = WAVE_TRIANGLE;
 
 // tone frequency
 static unsigned short g_base_freq;
@@ -426,19 +435,21 @@ SIGNAL(PWM_INTERRUPT)
   // base waveform
   fp = g_phase >> 3; // keep fp between zero and 2047
   sample = 0;
-  if (g_wave_type < 2)
-  {
-    if (g_wave_type == 0) { // rough sawtooth
-      sample = (short)1023-(short)fp;
-    }
-    else { // sawtooth
-      sample = (fp < 1024) ? (short)1023-(short)fp*2 : (short)fp*2-3072;
-    }
-  }
-  else { // square
+
+  switch (g_wave_type) {
+  case WAVE_SAWTOOTH:
+    sample = (short)1023-(short)fp;
+    break;
+  case WAVE_TRIANGLE:
+    sample = (fp < 1024) ? (short)1023-(short)fp*2 : (short)fp*2-3072;
+    break;
+  case WAVE_NOISE:
+    break;
+  default: /* WAVE_SQUARE */
     sample = (fp & 1024) ? 1023 : -1023;
+    break;
   }
-  
+
   // sample is between -1024 and 1023
   
   //
