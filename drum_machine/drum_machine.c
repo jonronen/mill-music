@@ -73,10 +73,75 @@ typedef enum _env_length_index {
 } env_length_index;
 
 typedef struct _envelope_state {
-  env_stage stage;
+  unsigned char stage;
+  unsigned char sustain;
   unsigned short phase;
   unsigned short lengths[ENV_LEN_IDX_MAX];
 } envelope_state;
+
+static void envelope_reset(envelope_state *env_state)
+{
+  env_state->stage=SILENCE;
+  env_state->phase=0;
+}
+
+static void envelope_init(envelope_state *env_state, unsigned char sustain_enabled)
+{
+  env_state->lengths[ATTACK_LEN_IDX] = 0;
+  env_state->lengths[RELEASE_LEN_IDX] = 0;
+  env_state->sustain = sustain_enabled;
+  envelope_reset(env_state);
+}
+
+static void envelope_start(envelope_state *env_state)
+{
+  env_state->stage = ATTACK;
+}
+
+static void envelope_release(envelope_state *env_state)
+{
+  if (env_state->stage < RELEASE) {
+    env_state->stage = RELEASE;
+  }
+}
+
+static unsigned char envelope_step(envelope_state *env_state)
+{
+  unsigned char env_vol = 0xff;
+
+  // compute by stage, keeping env_vol between zero and 0xff
+  switch (env_state->stage) {
+  case ATTACK:
+    env_state->phase++;
+    if (env_state->phase >= env_state->lengths[ATTACK_LEN_IDX]) {
+      env_state->phase = 0;
+      env_state->stage = env_state->sustain ? SUSTAIN : RELEASE;
+    }
+    env_vol = (unsigned char)(env_state->phase / (env_state->lengths[ATTACK_LEN_IDX]/0x100 + 1));
+    break;
+  case SUSTAIN:
+    env_vol = 255;
+    break;
+  case RELEASE:
+    env_state->phase++;
+    if (env_state->phase >= env_state->lengths[RELEASE_LEN_IDX]) {
+      env_state->phase = 0;
+      env_state->stage = SILENCE;
+    }
+    // env_vol can only decrease on RELEASE stage
+    unsigned char tmp = 255-(unsigned char)(env_state->phase / (env_state->lengths[RELEASE_LEN_IDX]/0x100 + 1));
+    if (tmp < env_vol) {
+      env_vol = tmp;
+    }
+    break;
+  default: /* case SILENCE */
+    // at stage three there's nothing to play
+    env_vol = 0;
+    break;
+  }
+
+  return env_vol;
+}
 
 static envelope_state g_env_state;
 
@@ -171,8 +236,7 @@ void setup()
   
   // set up the initial values for all the controls
 
-  g_env_state.lengths[ATTACK_LEN_IDX] = 0;
-  g_env_state.lengths[RELEASE_LEN_IDX] = 0;
+  envelope_init(&g_env_state, 0); /* no sustain in drums */
 
   g_base_freq = 440;
 
@@ -241,8 +305,8 @@ void loop()
 
   // envelopes are updated only on silence and sustain
   if ((g_env_state.stage != ATTACK) && (g_env_state.stage != RELEASE)) {
-    g_env_state.lengths[ATTACK_LEN_IDX] = 0; /* analogRead(ATTACK_CTRL) * 4; */
-    g_env_state.lengths[RELEASE_LEN_IDX] = 1000; /* 1000 + analogRead(RELEASE_CTRL) * 8; */
+    g_env_state.lengths[ATTACK_LEN_IDX] = 1000; /* analogRead(ATTACK_CTRL) * 4; */
+    g_env_state.lengths[RELEASE_LEN_IDX] = 5000; /* 1000 + analogRead(RELEASE_CTRL) * 8; */
   }
 
   // LPF and resonance are always welcome
@@ -262,8 +326,8 @@ void loop()
   new_status = get_button_status();
 
   // is the current pitch released?
-  if ((g_env_state.stage < RELEASE) && ((g_current_pitch_bit & new_status) == 0)) {
-    g_env_state.stage = RELEASE;
+  if ((g_current_pitch_bit & new_status) == 0) {
+    envelope_release(&g_env_state);
   }
 
   // are all buttons released?
@@ -294,7 +358,7 @@ void loop()
       cli();
       g_base_freq = get_base_freq(g_current_pitch_bit);
       reset_sample();
-      g_env_state.stage = ATTACK;
+      envelope_start(&g_env_state);
       sei();
     }
   }
@@ -314,8 +378,7 @@ static void reset_sample()
   g_interrupt_cnt = 0;
   
   // reset envelope
-  g_env_state.stage=SILENCE;
-  g_env_state.phase=0;
+  envelope_reset(&g_env_state);
 }
 
 /* interrupt handler - that's where the synthesis happens */
@@ -323,46 +386,14 @@ SIGNAL(PWM_INTERRUPT)
 {
   short sample;
   unsigned short fp;
-  unsigned char env_vol = 0xff;
-  unsigned char tmp;
+  unsigned char env_vol;
   short vib_fix;
 
   //
   // volume/low-pass envelope
   //
 
-  // compute by stage, keeping env_vol between zero and 0xff
-  switch (g_env_state.stage) {
-  case ATTACK:
-    g_env_state.phase++;
-    if (g_env_state.phase >= g_env_state.lengths[ATTACK_LEN_IDX]) {
-      g_env_state.phase = 0;
-      g_env_state.stage = 2; /* no sustain in drums */
-    }
-    env_vol = (unsigned char)(g_env_state.phase / (g_env_state.lengths[ATTACK_LEN_IDX]/0x100 + 1));
-    break;
-/* No sustain in drums
-  case SUSTAIN:
-    env_vol = 255;
-    break;
-*/
-  case RELEASE:
-    g_env_state.phase++;
-    if (g_env_state.phase >= g_env_state.lengths[RELEASE_LEN_IDX]) {
-      g_env_state.phase = 0;
-      g_env_state.stage = 3;
-    }
-    // env_vol can only decrease on stage 2
-    tmp = 255-(unsigned char)(g_env_state.phase / (g_env_state.lengths[RELEASE_LEN_IDX]/0x100 + 1));
-    if (tmp < env_vol) {
-      env_vol = tmp;
-    }
-    break;
-  default: /* case SILENCE */
-    // at stage three there's nothing to play
-    env_vol = 0;
-    break;
-  }
+  env_vol = envelope_step(&g_env_state);
 
   g_interrupt_cnt++;
   // tremolo adjustments
