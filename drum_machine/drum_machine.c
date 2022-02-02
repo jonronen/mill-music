@@ -55,14 +55,64 @@ typedef enum _wave_type {
   WAVE_TRIANGLE,
   WAVE_NOISE,
   WAVE_SQUARE
-};
-static const unsigned char g_wave_type = WAVE_TRIANGLE;
+} wave_type;
+
+typedef struct _wave_state {
+  unsigned short phase;
+  unsigned char type; /* wave_type */
+} wave_state;
+
+static void wave_reset(wave_state *wav_state)
+{
+  wav_state->phase = 0;
+}
+
+static void wave_init(wave_state *wav_state, wave_type type)
+{
+  wav_state->type = type;
+  wave_reset(wav_state);
+}
+
+static short wave_step(wave_state *wav_state, unsigned short frequency)
+{
+  //
+  // update the phase, assuming a sample rate of 16,384 Hz
+  //
+
+  wav_state->phase += frequency;
+  if (wav_state->phase & 0xC000)
+  {
+    wav_state->phase &= 0x3FFF;
+  }
+
+  // base waveform
+  unsigned short fp;
+  fp = wav_state->phase >> 3; // keep fp between zero and 2047
+
+  short sample = 0;
+
+  switch (wav_state->type) {
+  case WAVE_SAWTOOTH:
+    sample = (short)1023-(short)fp;
+    break;
+  case WAVE_TRIANGLE:
+    sample = (fp < 1024) ? (short)1023-(short)fp*2 : (short)fp*2-3072;
+    break;
+  case WAVE_NOISE:
+    break;
+  default: /* WAVE_SQUARE */
+    sample = (fp & 1024) ? 1023 : -1023;
+    break;
+  }
+
+  return sample;
+}
+
+// base frequency generation
+wave_state g_wave_state;
 
 // tone frequency
 static unsigned short g_base_freq;
-
-// base frequency generation
-static unsigned short g_phase;
 
 //
 // envelope
@@ -247,6 +297,8 @@ void setup()
 
   envelope_init(&g_env_state, 0); /* no sustain in drums */
 
+  wave_init(&g_wave_state, WAVE_TRIANGLE);
+
   g_base_freq = 440;
 
   g_lpf_resonance = 0;
@@ -377,7 +429,7 @@ void loop()
 
 static void reset_sample()
 {
-  g_phase = 0;
+  wave_reset(&g_wave_state);
 
   // reset filters
   g_lpf_prev = 0;
@@ -394,7 +446,6 @@ static void reset_sample()
 SIGNAL(PWM_INTERRUPT)
 {
   short sample;
-  unsigned short fp;
   unsigned char env_vol;
   short vib_fix;
 
@@ -417,40 +468,11 @@ SIGNAL(PWM_INTERRUPT)
   if (g_dist_status) {
     env_vol &= g_rand_shit[g_interrupt_cnt & 0xFF];
   }
-  
-  //
-  // phase of the current wave
-  //
-  
-  g_phase += g_base_freq;
-  if (g_phase & 0xC000)
-  {
-    g_phase &= 0x3FFF;
-  }
-  
+
   //
   // current sample computation
   //
-  
-  // base waveform
-  fp = g_phase >> 3; // keep fp between zero and 2047
-  sample = 0;
-
-  switch (g_wave_type) {
-  case WAVE_SAWTOOTH:
-    sample = (short)1023-(short)fp;
-    break;
-  case WAVE_TRIANGLE:
-    sample = (fp < 1024) ? (short)1023-(short)fp*2 : (short)fp*2-3072;
-    break;
-  case WAVE_NOISE:
-    break;
-  default: /* WAVE_SQUARE */
-    sample = (fp & 1024) ? 1023 : -1023;
-    break;
-  }
-
-  // sample is between -1024 and 1023
+  sample = wave_step(&g_wave_state, g_base_freq); // sample is between -1024 and 1023
   
   //
   // low-pass filter
