@@ -222,11 +222,50 @@ static unsigned char envelope_step(envelope_state *env_state)
 
 static envelope_state g_env_state;
 
-// low-pass filter
+typedef struct _low_pass_state {
+  short prev;
+  short prev_delta;
+} low_pass_state;
+
+static void low_pass_reset(low_pass_state *lpf_state)
+{
+  lpf_state->prev = 0;
+  lpf_state->prev_delta = 0;
+}
+
+static short low_pass_step(low_pass_state *lpf_state, short sample, unsigned char lpf_freq, unsigned char resonance)
+{
+  // start with the resonance - multiply lpf_state->prev_delta by the factor
+  lpf_state->prev_delta /= 0x10;
+  lpf_state->prev_delta *= resonance;
+  lpf_state->prev_delta /= 0x10;
+
+  //
+  // now add the low-pass part
+  //
+  // since sample and prev are both between -1024 and 1023,
+  // we can be sure that prev_delta will not be
+  // incremented/decremented by more than 2047
+  //
+  lpf_state->prev_delta +=
+    ((((short)sample-(short)lpf_state->prev) / 0x10) * (short)lpf_freq) / 0x10;
+  if (lpf_state->prev_delta > 2047) lpf_state->prev_delta = 2047;
+  else if (lpf_state->prev_delta < -2048) lpf_state->prev_delta = -2048;
+
+  // accumulate it to the filter's output
+  lpf_state->prev += lpf_state->prev_delta;
+
+  if (lpf_state->prev > 1023) lpf_state->prev = 1023;
+  if (lpf_state->prev < -1024) lpf_state->prev = -1024;
+
+  return lpf_state->prev;
+}
+
+low_pass_state g_lpf_state;
+
+// low-pass filter parameters
 static unsigned char g_lpf_resonance;
 static unsigned char g_lpf_freq;
-static short g_lpf_prev;
-static short g_lpf_prev_delta;
 
 // tremolo and distortion
 static unsigned short g_interrupt_cnt;
@@ -449,13 +488,12 @@ static void reset_sample()
 {
   wave_reset(&g_wave_state);
 
-  // reset filters
-  g_lpf_prev = 0;
-  g_lpf_prev_delta = 0;
-  
+  // reset low-pass filter
+  low_pass_reset(&g_lpf_state);
+
   // reset tremolo, distortion, and shit
   g_interrupt_cnt = 0;
-  
+
   // reset envelope
   envelope_reset(&g_env_state);
 }
@@ -495,32 +533,7 @@ SIGNAL(PWM_INTERRUPT)
   //
   // low-pass filter
   //
-
-  // start with the resonance - multiply g_lpf_prev_delta by the factor
-  g_lpf_prev_delta /= 0x10;
-  g_lpf_prev_delta *= g_lpf_resonance;
-  g_lpf_prev_delta /= 0x10;
-
-  //
-  // now add the low-pass part
-  //
-  // since sample and g_lpf_prev are both between -1024 and 1023,
-  // we can be sure that g_lpf_prev_delta will not be
-  // incremented/decremented by more than 2047
-  //
-  g_lpf_prev_delta +=
-    ((((short)sample-(short)g_lpf_prev) / 0x10) * (short)g_lpf_freq) / 0x10;
-  if (g_lpf_prev_delta > 2047) g_lpf_prev_delta = 2047;
-  else if (g_lpf_prev_delta < -2048) g_lpf_prev_delta = -2048;
- 
-  // accumulate it to the filter's output
-  g_lpf_prev += g_lpf_prev_delta;
-
-  if (g_lpf_prev > 1023) g_lpf_prev = 1023;
-  if (g_lpf_prev < -1024) g_lpf_prev = -1024;
-
-  // filter output
-  sample = g_lpf_prev;
+  sample = low_pass_step(&g_lpf_state, sample, g_lpf_freq, g_lpf_resonance);
 
   // now sample is between -1024 and 1023
   // scale it between -128 and 127
