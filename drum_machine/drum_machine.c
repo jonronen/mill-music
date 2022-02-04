@@ -76,14 +76,12 @@ typedef enum _wave_type {
 
 typedef struct _wave_state {
   unsigned short phase;
-  unsigned char noise_idx;
   unsigned char type; /* wave_type */
 } wave_state;
 
 static void wave_reset(wave_state *wav_state)
 {
   wav_state->phase = 0;
-  wav_state->noise_idx = 0;
 }
 
 static void wave_init(wave_state *wav_state, wave_type type)
