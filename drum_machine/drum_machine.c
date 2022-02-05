@@ -25,6 +25,10 @@
 #define TONE3_PIN       9
 #define TONE4_PIN       10
 
+#define NUM_BUTTONS 4
+static const unsigned short frequencies[NUM_BUTTONS] = {50, 60, 80, 100};
+static const unsigned char button_indices[NUM_BUTTONS] = {TONE1_PIN, TONE2_PIN, TONE3_PIN, TONE4_PIN};
+
 #define DIST_PIN        0
 #define TREM_PIN        1
 
@@ -128,9 +132,6 @@ static short wave_step(wave_state *wav_state, unsigned short frequency)
 
 // base frequency generation
 wave_state g_wave_state;
-
-// tone frequency
-static unsigned short g_base_freq;
 
 //
 // envelope
@@ -271,8 +272,116 @@ static unsigned char g_lpf_freq;
 static unsigned short g_interrupt_cnt;
 
 // buttons
-static uint8_t g_button_status;
-static uint8_t g_current_pitch_bit;
+
+#define MAX_BUTTONS_IN_SET 8
+typedef struct _button_set {
+  unsigned short frequencies[MAX_BUTTONS_IN_SET];
+  unsigned short current_pitch;
+  unsigned char button_count; /* possible values: between 1 and MAX_BUTTONS_IN_SET */
+  unsigned char button_indices[MAX_BUTTONS_IN_SET];
+  unsigned char button_bitmap;
+  unsigned char current_pitch_bit;
+} button_set;
+
+typedef enum _button_status {
+  NO_UPDATE,
+  NEW_BUTTON_PRESSED,
+  BUTTON_RELEASED
+} button_status;
+
+void button_set_init(
+    button_set *set,
+    const unsigned short frequencies[],
+    const unsigned char indices[],
+    unsigned char count)
+{
+  unsigned char idx;
+
+  set->button_count = count;
+
+  for (idx = 0; idx < count; idx++) {
+    set->frequencies[idx] = frequencies[idx];
+    set->button_indices[idx] = indices[idx];
+
+    /* set pin to input with pull-up */
+    pinMode(indices[idx], INPUT);
+    digitalWrite(indices[idx], HIGH);
+  }
+
+  set->button_bitmap = 0;
+  set->current_pitch = 0;
+  set->current_pitch_bit = 0;
+}
+
+static button_status button_status_update(button_set *set)
+{
+  unsigned char button_bitmap = 0;
+  unsigned char button_idx;
+  unsigned char tmp_pitch_bit;
+  button_status stat = NO_UPDATE;
+
+  for (button_idx = 0; button_idx < set->button_count; button_idx++) {
+    if (digitalRead(set->button_indices[button_idx]) == LOW) {
+      button_bitmap |= (1 << button_idx);
+    }
+  }
+
+  // is the current pitch released?
+  if ((set->current_pitch_bit != 0) && ((set->current_pitch_bit & button_bitmap) == 0)) {
+    stat = BUTTON_RELEASED;
+  }
+
+  // are all buttons released?
+  if (button_bitmap == 0) {
+    set->current_pitch_bit = 0x00;
+  }
+  // or is a different pitch selected?
+  else if (button_bitmap != set->button_bitmap) {
+    set->current_pitch_bit = 1;
+    stat = NEW_BUTTON_PRESSED;
+
+    tmp_pitch_bit = set->current_pitch_bit;
+
+    // if a new button is pressed - select it
+    if (button_bitmap & (~set->button_bitmap)) {
+      tmp_pitch_bit = button_bitmap & (~set->button_bitmap);
+    }
+    // or if the current pitch is released - select another
+    else if ((button_bitmap & (~set->current_pitch_bit)) == 0) {
+      tmp_pitch_bit = button_bitmap;
+    }
+
+    // select only one pitch
+    tmp_pitch_bit &= (~(tmp_pitch_bit-1));
+
+    // if it's really a different pitch, play it
+    if (tmp_pitch_bit != set->current_pitch_bit) {
+      set->current_pitch_bit = tmp_pitch_bit;
+
+      // change the pitch with interrupts disabled, since the field is used when handling interrupts
+      cli();
+      for (button_idx = 0; button_idx < set->button_count; button_idx++) {
+        if (set->current_pitch_bit & (1 << button_idx)) {
+          set->current_pitch = set->frequencies[button_idx];
+        }
+      }
+      sei();
+      stat = NEW_BUTTON_PRESSED;
+    }
+  }
+
+  set->button_bitmap = button_bitmap;
+
+  return stat;
+}
+
+static unsigned short button_set_get_base_freq(const button_set *set)
+{
+  return set->current_pitch;
+}
+
+static button_set g_button_set;
+
 static uint8_t g_dist_status;
 static uint8_t g_trem_status;
 
@@ -356,25 +465,13 @@ void setup()
 
   wave_init(&g_wave_state, WAVE_TRIANGLE);
 
-  g_base_freq = 440;
+  button_set_init(&g_button_set, frequencies, button_indices, NUM_BUTTONS);
 
   g_lpf_resonance = 0;
   
   // set the parameters but don't start playing
   reset_sample();
   
-  // play notes
-  pinMode(TONE1_PIN, INPUT);
-  digitalWrite(TONE1_PIN, HIGH);
-  pinMode(TONE2_PIN, INPUT);
-  digitalWrite(TONE2_PIN, HIGH);
-  pinMode(TONE3_PIN, INPUT);
-  digitalWrite(TONE3_PIN, HIGH);
-  pinMode(TONE4_PIN, INPUT);
-  digitalWrite(TONE4_PIN, HIGH);
-  g_button_status = 0; // no buttons are pressed
-  g_current_pitch_bit = 0; // no buttons are pressed
-
   // distortion
   pinMode(DIST_PIN, INPUT);
   digitalWrite(DIST_PIN, HIGH);
@@ -389,29 +486,10 @@ void setup()
   sei();
 }
 
-static unsigned char get_button_status()
-{
-  unsigned char ans = 0;
-  if (digitalRead(TONE1_PIN) == LOW) ans |= 0x01;
-  if (digitalRead(TONE2_PIN) == LOW) ans |= 0x02;
-  if (digitalRead(TONE3_PIN) == LOW) ans |= 0x04;
-  if (digitalRead(TONE4_PIN) == LOW) ans |= 0x08;
-  return ans;
-}
-
-static unsigned short get_base_freq(unsigned char status)
-{
-  if (status & 0x08) return 100;
-  if (status & 0x04) return 80;
-  if (status & 0x02) return 60;
-  return 50;
-}
-
 void loop()
 {
-  uint8_t new_status;
+  button_status button_stat;
   uint8_t tmp;
-  uint8_t tmp_pitch_bit;
 
   //
   // the loop updates the sound parameters
@@ -440,48 +518,17 @@ void loop()
   //
   // pitch buttons
   //
-
-  new_status = get_button_status();
-
-  // is the current pitch released?
-  if ((g_current_pitch_bit & new_status) == 0) {
+  button_stat = button_status_update(&g_button_set);
+  if (button_stat == BUTTON_RELEASED) {
     envelope_release(&g_env_state);
   }
-
-  // are all buttons released?
-  if (new_status == 0) {
-    g_current_pitch_bit = 0x00;
+  else if (button_stat == NEW_BUTTON_PRESSED) {
+    // reset the current tone with interrupts disabled
+    cli();
+    reset_sample();
+    envelope_start(&g_env_state);
+    sei();
   }
-  // or is a different pitch selected?
-  else if (new_status != g_button_status) {
-    tmp_pitch_bit = g_current_pitch_bit;
-
-    // if a new button is pressed - select it
-    if (new_status & (~g_button_status)) {
-      tmp_pitch_bit = new_status & (~g_button_status);
-    }
-    // or if the current pitch is released - select another
-    else if ((new_status & (~g_current_pitch_bit)) == 0) {
-      tmp_pitch_bit = new_status;
-    }
-
-    // select only one pitch
-    tmp_pitch_bit &= (~(tmp_pitch_bit-1));
-
-    // if it's really a different pitch, play it
-    if (tmp_pitch_bit != g_current_pitch_bit) {
-      g_current_pitch_bit = tmp_pitch_bit;
-
-      // change the pitch with interrupts disabled
-      cli();
-      g_base_freq = get_base_freq(g_current_pitch_bit);
-      reset_sample();
-      envelope_start(&g_env_state);
-      sei();
-    }
-  }
-
-  g_button_status = new_status;
 }
 
 static void reset_sample()
@@ -525,9 +572,9 @@ SIGNAL(PWM_INTERRUPT)
   }
 
   //
-  // current sample computation
+  // current sample computation (sample is between -1024 and 1023)
   //
-  sample = wave_step(&g_wave_state, g_base_freq); // sample is between -1024 and 1023
+  sample = wave_step(&g_wave_state, button_set_get_base_freq(&g_button_set));
   
   //
   // low-pass filter
