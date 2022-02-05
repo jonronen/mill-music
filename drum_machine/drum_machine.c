@@ -503,7 +503,6 @@ SIGNAL(PWM_INTERRUPT)
 {
   short sample;
   unsigned char env_vol;
-  short vib_fix;
 
   //
   // volume/low-pass envelope
